@@ -47,6 +47,13 @@ export default function Home() {
       <button onClick={handlePago}>
         Comprar ahora - $199 MXN
       </button>
+
+      <br /><br />
+
+      <a href="/dashboard">
+        <button>Entrar al sistema</button>
+      </a>
+
     </main>
   );
 }
