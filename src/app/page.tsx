@@ -1,55 +1,52 @@
 'use client';
 
-import { loadStripe } from '@stripe/stripe-js';
-
-const stripePromise = loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY!);
+import { useEffect } from 'react';
 
 export default function Home() {
-  const handleCheckout = async () => {
+
+  useEffect(() => {
+    const script = document.createElement('script');
+    script.src = 'https://js.stripe.com/v3/';
+    script.async = true;
+    document.body.appendChild(script);
+  }, []);
+
+  const handlePago = async () => {
     try {
-      const response = await fetch('/api/crear-pago', {
+      const stripe = (window as any).Stripe('pk_test_51TFIn1FCwyyS7eA2kIBrgajQfBIELinvVknc3wFvdbgjl1vbIyBLfG6qg5HQFDeYh892uKyhlxCWWtwT1DwLN7hI00EHKuenix');
+
+      const res = await fetch('/api/crear-pago', {
         method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        }
       });
 
-      const { id, error } = await response.json();
+      const data = await res.json();
 
-      if (error) {
-        alert(`Error: ${error}`);
+      if (!data.id) {
+        alert('Error creando sesión');
         return;
       }
 
-      const stripe = await stripePromise;
-      const { error: stripeError } = await stripe!.redirectToCheckout({
-        sessionId: id,
+      await stripe.redirectToCheckout({
+        sessionId: data.id
       });
 
-      if (stripeError) {
-        alert(stripeError.message);
-      }
-    } catch (err) {
-      console.error('Error en checkout:', err);
-      alert('Ocurrió un error. Intenta de nuevo.');
+    } catch (error) {
+      console.error(error);
+      alert('Error al procesar el pago');
     }
   };
 
   return (
-    <div style={{ padding: '2rem', textAlign: 'center' }}>
+    <main style={{ textAlign: 'center', marginTop: '50px' }}>
       <h1>Planea Docente</h1>
       <p>Sistema profesional de planeación didáctica</p>
-      <button 
-        onClick={handleCheckout}
-        style={{
-          padding: '12px 24px',
-          fontSize: '16px',
-          backgroundColor: '#635bff',
-          color: 'white',
-          border: 'none',
-          borderRadius: '8px',
-          cursor: 'pointer',
-        }}
-      >
+
+      <button onClick={handlePago}>
         Comprar ahora - $199 MXN
       </button>
-    </div>
+    </main>
   );
 }
