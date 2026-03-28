@@ -1771,3 +1771,330 @@ INSERT INTO public.subscription_plans (
   3
 )
 ON CONFLICT DO NOTHING;
+
+-- ============================================================
+-- FASE 1: FUNCIONES UTILITARIAS
+-- ============================================================
+
+-- Función estándar para actualizar updated_at
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================================
+-- FASE 3: FUNCIONES DE LÓGICA (dependen de tablas existentes)
+-- ============================================================
+
+-- Verificar si el usuario tiene un rol específico
+CREATE OR REPLACE FUNCTION public.has_role(_role rol_usuario)
+RETURNS BOOLEAN
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+STABLE
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.user_roles
+    WHERE user_id = auth.uid()
+    AND role = _role
+  );
+$$;
+
+-- Verificar si el usuario es maestro de un grupo específico
+CREATE OR REPLACE FUNCTION public.is_maestro_del_grupo(_grupo_id UUID)
+RETURNS BOOLEAN
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+STABLE
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.grupos
+    WHERE id = _grupo_id
+    AND maestro_id = auth.uid()
+  );
+$$;
+
+-- Verificar si el usuario es tutor de un alumno específico
+CREATE OR REPLACE FUNCTION public.is_tutor_del_alumno(_alumno_id UUID)
+RETURNS BOOLEAN
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+STABLE
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.alumnos a
+    JOIN public.tutores t ON t.id = a.tutor_id
+    WHERE a.id = _alumno_id
+    AND t.user_id = auth.uid()
+  );
+$$;
+
+-- Verificar si el usuario tiene suscripción activa
+CREATE OR REPLACE FUNCTION public.has_active_subscription()
+RETURNS BOOLEAN
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+STABLE
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.subscriptions
+    WHERE user_id = auth.uid()
+    AND estado IN ('active', 'trialing')
+    AND (fecha_fin IS NULL OR fecha_fin > now())
+  );
+$$;
+
+-- Obtener el plan activo del usuario actual
+CREATE OR REPLACE FUNCTION public.get_user_subscription_plan()
+RETURNS TABLE(
+  plan_nombre VARCHAR,
+  estado TEXT,
+  fecha_prueba_fin TIMESTAMPTZ,
+  fecha_fin TIMESTAMPTZ,
+  stripe_subscription_id VARCHAR
+)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+STABLE
+AS $$
+  SELECT
+    sp.nombre AS plan_nombre,
+    s.estado::TEXT,
+    s.fecha_prueba_fin,
+    s.fecha_fin,
+    s.stripe_subscription_id
+  FROM public.subscriptions s
+  JOIN public.subscription_plans sp ON sp.id = s.plan_id
+  WHERE s.user_id = auth.uid()
+  ORDER BY s.created_at DESC
+  LIMIT 1;
+$$;
+
+-- Función para sincronizar nuevos usuarios de auth.users
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  -- Crear perfil del usuario
+  INSERT INTO public.profiles (id, email, full_name, avatar_url, rol)
+  VALUES (
+    NEW.id,
+    NEW.email,
+    COALESCE(NEW.raw_user_meta_data->>'full_name', NEW.email),
+    NEW.raw_user_meta_data->>'avatar_url',
+    'maestro'
+  )
+  ON CONFLICT (id) DO NOTHING;
+
+  -- Asignar rol por defecto
+  INSERT INTO public.user_roles (user_id, role)
+  VALUES (NEW.id, 'maestro')
+  ON CONFLICT (user_id, role) DO NOTHING;
+
+  RETURN NEW;
+END;
+$$;
+
+-- ============================================================
+-- FASE 5: TRIGGERS
+-- ============================================================
+
+-- Trigger para sincronizar nuevos usuarios de Supabase Auth
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- Triggers de updated_at para todas las tablas
+DROP TRIGGER IF EXISTS update_profiles_updated_at ON public.profiles;
+CREATE TRIGGER update_profiles_updated_at
+  BEFORE UPDATE ON public.profiles
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_user_roles_updated_at ON public.user_roles;
+CREATE TRIGGER update_user_roles_updated_at
+  BEFORE UPDATE ON public.user_roles
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_subscriptions_updated_at ON public.subscriptions;
+CREATE TRIGGER update_subscriptions_updated_at
+  BEFORE UPDATE ON public.subscriptions
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_subscription_plans_updated_at ON public.subscription_plans;
+CREATE TRIGGER update_subscription_plans_updated_at
+  BEFORE UPDATE ON public.subscription_plans
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_payment_history_updated_at ON public.payment_history;
+CREATE TRIGGER update_payment_history_updated_at
+  BEFORE UPDATE ON public.payment_history
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_stripe_config_updated_at ON public.stripe_config;
+CREATE TRIGGER update_stripe_config_updated_at
+  BEFORE UPDATE ON public.stripe_config
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_planeaciones_updated_at ON public.planeaciones;
+CREATE TRIGGER update_planeaciones_updated_at
+  BEFORE UPDATE ON public.planeaciones
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_actividades_updated_at ON public.actividades;
+CREATE TRIGGER update_actividades_updated_at
+  BEFORE UPDATE ON public.actividades
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_alumnos_updated_at ON public.alumnos;
+CREATE TRIGGER update_alumnos_updated_at
+  BEFORE UPDATE ON public.alumnos
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_grupos_updated_at ON public.grupos;
+CREATE TRIGGER update_grupos_updated_at
+  BEFORE UPDATE ON public.grupos
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_materias_updated_at ON public.materias;
+CREATE TRIGGER update_materias_updated_at
+  BEFORE UPDATE ON public.materias
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_calificaciones_updated_at ON public.calificaciones;
+CREATE TRIGGER update_calificaciones_updated_at
+  BEFORE UPDATE ON public.calificaciones
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_asistencia_updated_at ON public.asistencia;
+CREATE TRIGGER update_asistencia_updated_at
+  BEFORE UPDATE ON public.asistencia
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_comunicados_updated_at ON public.comunicados;
+CREATE TRIGGER update_comunicados_updated_at
+  BEFORE UPDATE ON public.comunicados
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_escuelas_updated_at ON public.escuelas;
+CREATE TRIGGER update_escuelas_updated_at
+  BEFORE UPDATE ON public.escuelas
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_tutores_updated_at ON public.tutores;
+CREATE TRIGGER update_tutores_updated_at
+  BEFORE UPDATE ON public.tutores
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_rubricas_updated_at ON public.rubricas;
+CREATE TRIGGER update_rubricas_updated_at
+  BEFORE UPDATE ON public.rubricas
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_examenes_updated_at ON public.examenes;
+CREATE TRIGGER update_examenes_updated_at
+  BEFORE UPDATE ON public.examenes
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_evidencias_updated_at ON public.evidencias;
+CREATE TRIGGER update_evidencias_updated_at
+  BEFORE UPDATE ON public.evidencias
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================================
+-- DATOS INICIALES: PLANES DE SUSCRIPCIÓN
+-- IMPORTANTE: Reemplaza los stripe_price_id con los IDs reales
+-- de tu dashboard de Stripe (Productos > Precios)
+-- ============================================================
+
+INSERT INTO public.subscription_plans (
+  nombre,
+  descripcion,
+  precio_centavos,
+  moneda,
+  intervalo,
+  dias_prueba,
+  stripe_price_id,
+  stripe_product_id,
+  caracteristicas,
+  activo,
+  orden
+) VALUES
+(
+  'Básico',
+  'Ideal para maestros independientes que quieren organizar su trabajo docente.',
+  19900,
+  'mxn',
+  'month',
+  15,
+  'price_REEMPLAZAR_BASICO_MENSUAL',
+  'prod_REEMPLAZAR_BASICO',
+  '[
+    "1 grupo activo",
+    "Hasta 40 alumnos",
+    "Planeaciones ilimitadas",
+    "Registro de asistencia",
+    "Calificaciones básicas",
+    "Soporte por email"
+  ]'::jsonb,
+  true,
+  1
+),
+(
+  'Profesional',
+  'Para maestros que necesitan herramientas avanzadas y generación con IA.',
+  39900,
+  'mxn',
+  'month',
+  15,
+  'price_REEMPLAZAR_PRO_MENSUAL',
+  'prod_REEMPLAZAR_PRO',
+  '[
+    "Grupos ilimitados",
+    "Alumnos ilimitados",
+    "Planeaciones con IA",
+    "Exámenes con IA",
+    "Rúbricas y listas de cotejo",
+    "Comunicados a padres",
+    "Evidencias y portafolio",
+    "Reportes avanzados",
+    "Soporte prioritario"
+  ]'::jsonb,
+  true,
+  2
+),
+(
+  'Escuela',
+  'Solución completa para directores y equipos docentes de toda la escuela.',
+  99900,
+  'mxn',
+  'month',
+  15,
+  'price_REEMPLAZAR_ESCUELA_MENSUAL',
+  'prod_REEMPLAZAR_ESCUELA',
+  '[
+    "Todo lo del plan Profesional",
+    "Hasta 20 maestros",
+    "Panel de director",
+    "Gestión centralizada",
+    "Estadísticas por escuela",
+    "Configuración personalizada",
+    "Integración con padres de familia",
+    "Soporte dedicado",
+    "Capacitación incluida"
+  ]'::jsonb,
+  true,
+  3
+)
+ON CONFLICT DO NOTHING;
