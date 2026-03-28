@@ -1,8 +1,6 @@
-import type { Metadata } from 'next';
-
-export const metadata: Metadata = {
-  title: 'Planea Docente - Sistema de Planeación Didáctica',
-  description: 'Plataforma profesional para maestros. Crea planeaciones en minutos.',
+export const metadata = {
+  title: 'Planea Docente',
+  description: 'Sistema educativo',
 };
 
 export default function RootLayout({
@@ -12,7 +10,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="es">
-      <body style={{ margin: 0, padding: 0, fontFamily: 'system-ui, sans-serif' }}>
+      <body>
         {children}
       </body>
     </html>
