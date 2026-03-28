@@ -1,44 +1,61 @@
 
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   CreditCard, Check, Star, Zap, Shield, Clock,
   Crown, AlertCircle, Loader2, CheckCircle2,
-  Gift, X, ExternalLink, TrendingUp, RefreshCw,
-  ChevronRight, XCircle,
+  Gift, ExternalLink, TrendingUp, RefreshCw,
+  XCircle, BadgeCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { toast } from "sonner";
+import { supabase } from "@/integrations/supabase/client";
 import StripeConfigModal from "./StripeConfigModal";
 import PaymentHistoryTable from "./PaymentHistoryTable";
 
-interface Plan {
+interface DbPlan {
   id: string;
-  name: string;
-  monthlyPrice: number;
-  annualPrice: number;
-  annualSavings: number;
-  gradient: string;
-  icon: React.ElementType;
-  badge?: string;
-  features: string[];
-  popular?: boolean;
+  nombre: string;
+  descripcion: string | null;
+  precio_centavos: number;
+  moneda: string;
+  intervalo: "month" | "year";
+  dias_prueba: number;
+  stripe_price_id: string | null;
+  caracteristicas: string[];
+  activo: boolean;
+  orden: number;
 }
 
-const plans: Plan[] = [
+interface ActiveSubscription {
+  subscription: {
+    id: string;
+    estado: string;
+    fecha_prueba_fin: string | null;
+    fecha_fin: string | null;
+    cancelar_al_periodo_fin: boolean;
+  };
+  plan: DbPlan | null;
+}
+
+// Fallback static plans when DB has no data yet
+const FALLBACK_PLANS = [
   {
     id: "basico",
-    name: "Básico",
-    monthlyPrice: 9900,
-    annualPrice: 99000,
-    annualSavings: 19800,
-    gradient: "from-blue-500 to-blue-700",
-    icon: Zap,
-    features: [
+    nombre: "Básico",
+    precio_centavos: 9900,
+    moneda: "mxn",
+    intervalo: "month" as const,
+    dias_prueba: 15,
+    stripe_price_id: null,
+    descripcion: null,
+    activo: true,
+    orden: 1,
+    caracteristicas: [
       "Hasta 35 alumnos",
       "Registro de asistencia",
       "Planeaciones básicas",
@@ -48,15 +65,16 @@ const plans: Plan[] = [
   },
   {
     id: "profesional",
-    name: "Profesional",
-    monthlyPrice: 19900,
-    annualPrice: 199000,
-    annualSavings: 39800,
-    gradient: "from-violet-600 to-purple-700",
-    icon: Star,
-    badge: "⭐ Más Popular",
-    popular: true,
-    features: [
+    nombre: "Profesional",
+    precio_centavos: 19900,
+    moneda: "mxn",
+    intervalo: "month" as const,
+    dias_prueba: 15,
+    stripe_price_id: null,
+    descripcion: null,
+    activo: true,
+    orden: 2,
+    caracteristicas: [
       "Alumnos ilimitados",
       "Herramientas de IA incluidas",
       "Generación de imágenes IA",
@@ -69,14 +87,16 @@ const plans: Plan[] = [
   },
   {
     id: "institucional",
-    name: "Institucional",
-    monthlyPrice: 49900,
-    annualPrice: 499000,
-    annualSavings: 99800,
-    gradient: "from-amber-500 to-orange-600",
-    icon: Crown,
-    badge: "🏫 Para Escuelas",
-    features: [
+    nombre: "Institucional",
+    precio_centavos: 49900,
+    moneda: "mxn",
+    intervalo: "month" as const,
+    dias_prueba: 15,
+    stripe_price_id: null,
+    descripcion: null,
+    activo: true,
+    orden: 3,
+    caracteristicas: [
       "Todo lo de Profesional",
       "Múltiples maestros",
       "Panel de director",
@@ -89,29 +109,91 @@ const plans: Plan[] = [
   },
 ];
 
+const PLAN_META: Record<string, { gradient: string; icon: React.ElementType; badge?: string; popular?: boolean }> = {
+  Básico: { gradient: "from-blue-500 to-blue-700", icon: Zap },
+  Profesional: { gradient: "from-violet-600 to-purple-700", icon: Star, badge: "⭐ Más Popular", popular: true },
+  Institucional: { gradient: "from-amber-500 to-orange-600", icon: Crown, badge: "🏫 Para Escuelas" },
+};
+
+function getPlanMeta(nombre: string) {
+  return PLAN_META[nombre] ?? { gradient: "from-gray-500 to-gray-700", icon: Zap };
+}
+
 function formatPrice(cents: number): string {
   return `$${(cents / 100).toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}`;
+}
+
+function formatDate(dateStr: string): string {
+  return new Date(dateStr).toLocaleDateString("es-MX", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
 }
 
 export default function SuscripcionSection() {
   const [billingInterval, setBillingInterval] = useState<"month" | "year">("month");
   const [isLoading, setIsLoading] = useState<string | null>(null);
   const [showStripeConfig, setShowStripeConfig] = useState(false);
+  const [plans, setPlans] = useState<DbPlan[]>([]);
+  const [activeSub, setActiveSub] = useState<ActiveSubscription | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [plansLoading, setPlansLoading] = useState(true);
 
-  const handleSubscribe = async (plan: Plan) => {
+  const loadData = useCallback(async () => {
+    setPlansLoading(true);
+    try {
+      const [plansRes, sessionData] = await Promise.all([
+        fetch("/api/subscription-plans"),
+        supabase.auth.getSession(),
+      ]);
+
+      const plansJson = await plansRes.json();
+      if (plansJson.success && plansJson.data?.length > 0) {
+        setPlans(plansJson.data);
+      } else {
+        setPlans(FALLBACK_PLANS);
+      }
+
+      const uid = sessionData.data?.session?.user?.id ?? null;
+      setUserId(uid);
+
+      if (uid) {
+        const subRes = await fetch(`/api/user-subscription?user_id=${uid}`);
+        const subJson = await subRes.json();
+        if (subJson.success && subJson.data) {
+          setActiveSub(subJson.data);
+        }
+      }
+    } catch (err) {
+      console.error("Error loading subscription data:", err);
+      setPlans(FALLBACK_PLANS);
+    } finally {
+      setPlansLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const handleSubscribe = async (plan: DbPlan) => {
     setIsLoading(plan.id);
-    const unitAmount = billingInterval === "year" ? plan.annualPrice : plan.monthlyPrice;
+    const annualPrice = Math.round(plan.precio_centavos * 10);
+    const unitAmount = billingInterval === "year" ? annualPrice : plan.precio_centavos;
 
     try {
       const res = await fetch("/next_api/stripe/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          productName: `PlaneaDocente ${plan.name} - ${billingInterval === "year" ? "Anual" : "Mensual"}`,
+          productName: `PlaneaDocente ${plan.nombre} - ${billingInterval === "year" ? "Anual" : "Mensual"}`,
           amount: unitAmount,
-          currency: "mxn",
+          currency: plan.moneda ?? "mxn",
           quantity: 1,
           interval: billingInterval,
+          planId: plan.id,
+          userId: userId,
         }),
       });
 
@@ -132,22 +214,38 @@ export default function SuscripcionSection() {
   return (
     <div className="space-y-8">
       <HeroBanner />
-      <TrialBanner />
+
+      {activeSub && <ActiveSubscriptionBanner activeSub={activeSub} />}
+
+      {!activeSub && <TrialBanner />}
 
       <BillingToggle billingInterval={billingInterval} onChange={setBillingInterval} />
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {plans.map((plan, i) => (
-          <PlanCard
-            key={plan.id}
-            plan={plan}
-            index={i}
-            billingInterval={billingInterval}
-            isLoading={isLoading === plan.id}
-            onSubscribe={handleSubscribe}
-          />
-        ))}
-      </div>
+      {plansLoading ? (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="h-96 rounded-2xl bg-muted/50 animate-pulse" />
+          ))}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          {plans.map((plan, i) => {
+            const meta = getPlanMeta(plan.nombre);
+            return (
+              <PlanCard
+                key={plan.id}
+                plan={plan}
+                meta={meta}
+                index={i}
+                billingInterval={billingInterval}
+                isLoading={isLoading === plan.id}
+                isActive={activeSub?.plan?.id === plan.id}
+                onSubscribe={handleSubscribe}
+              />
+            );
+          })}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <TrustCard icon={<Shield className="w-6 h-6 text-green-500" />} title="Pago Seguro" desc="Procesado por Stripe con cifrado SSL de 256 bits" />
@@ -159,7 +257,7 @@ export default function SuscripcionSection() {
         <CardHeader className="flex flex-row items-center justify-between pb-3">
           <div>
             <CardTitle className="text-base">Configuración de Stripe</CardTitle>
-            <CardDescription>Conecta tu cuenta de Stripe para recibir pagos de tus suscriptores</CardDescription>
+            <CardDescription>Conecta tu cuenta de Stripe para recibir pagos</CardDescription>
           </div>
           <Button variant="outline" size="sm" onClick={() => setShowStripeConfig(true)}>
             <CreditCard className="w-4 h-4 mr-2" />
@@ -185,8 +283,13 @@ export default function SuscripcionSection() {
             })}
           </div>
           <p className="text-xs text-muted-foreground mt-3">
-            Estas variables deben configurarse en el servidor. Obtén tus claves en{" "}
-            <a href="https://dashboard.stripe.com/apikeys" target="_blank" rel="noopener noreferrer" className="text-primary underline inline-flex items-center gap-1">
+            Obtén tus claves en{" "}
+            <a
+              href="https://dashboard.stripe.com/apikeys"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-primary underline inline-flex items-center gap-1"
+            >
               dashboard.stripe.com <ExternalLink className="w-3 h-3" />
             </a>
           </p>
@@ -203,6 +306,48 @@ export default function SuscripcionSection() {
         )}
       </AnimatePresence>
     </div>
+  );
+}
+
+function ActiveSubscriptionBanner({ activeSub }: { activeSub: ActiveSubscription }) {
+  const { subscription, plan } = activeSub;
+  const isTrialing = subscription.estado === "trialing";
+  const isActive = subscription.estado === "active";
+  const isCanceled = subscription.estado === "canceled";
+
+  const statusColor = isActive || isTrialing
+    ? "bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800"
+    : "bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800";
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      className={`rounded-2xl p-5 border ${statusColor}`}
+    >
+      <div className="flex items-center gap-4">
+        <div className="w-12 h-12 bg-emerald-100 dark:bg-emerald-900 rounded-xl flex items-center justify-center shrink-0">
+          <BadgeCheck className="w-6 h-6 text-emerald-600" />
+        </div>
+        <div className="flex-1">
+          <h3 className="font-bold text-emerald-800 dark:text-emerald-300 text-lg">
+            {isTrialing ? "🎁 Período de prueba activo" : isActive ? "✅ Suscripción activa" : "⚠️ Suscripción " + subscription.estado}
+          </h3>
+          <p className="text-sm text-emerald-700 dark:text-emerald-400">
+            Plan: <strong>{plan?.nombre ?? "—"}</strong>
+            {isTrialing && subscription.fecha_prueba_fin && (
+              <> · Prueba hasta: {formatDate(subscription.fecha_prueba_fin)}</>
+            )}
+            {isActive && subscription.fecha_fin && (
+              <> · Próximo cobro: {formatDate(subscription.fecha_fin)}</>
+            )}
+            {subscription.cancelar_al_periodo_fin && (
+              <span className="ml-2 text-amber-600"> · Se cancela al final del período</span>
+            )}
+          </p>
+        </div>
+      </div>
+    </motion.div>
   );
 }
 
@@ -306,22 +451,26 @@ function BillingToggle({
 
 function PlanCard({
   plan,
+  meta,
   index,
   billingInterval,
   isLoading,
+  isActive,
   onSubscribe,
 }: {
-  plan: Plan;
+  plan: DbPlan;
+  meta: { gradient: string; icon: React.ElementType; badge?: string; popular?: boolean };
   index: number;
   billingInterval: "month" | "year";
   isLoading: boolean;
-  onSubscribe: (plan: Plan) => void;
+  isActive: boolean;
+  onSubscribe: (plan: DbPlan) => void;
 }) {
-  const Icon = plan.icon;
-  const monthlyEquivalent = billingInterval === "year"
-    ? Math.round(plan.annualPrice / 12)
-    : plan.monthlyPrice;
-  const annualTotal = plan.annualPrice;
+  const Icon = meta.icon;
+  const annualPrice = Math.round(plan.precio_centavos * 10);
+  const annualSavings = plan.precio_centavos * 12 - annualPrice;
+  const monthlyEquivalent =
+    billingInterval === "year" ? Math.round(annualPrice / 12) : plan.precio_centavos;
 
   return (
     <motion.div
@@ -329,24 +478,31 @@ function PlanCard({
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: index * 0.1 }}
       className={`relative bg-card rounded-2xl border shadow-sm overflow-hidden flex flex-col ${
-        plan.popular ? "border-primary shadow-lg shadow-primary/10 scale-[1.02]" : "border-border"
-      }`}
+        meta.popular ? "border-primary shadow-lg shadow-primary/10 scale-[1.02]" : "border-border"
+      } ${isActive ? "ring-2 ring-emerald-500" : ""}`}
     >
-      {plan.popular && (
+      {meta.popular && (
         <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-violet-500 to-purple-600" />
       )}
+      {isActive && (
+        <div className="absolute top-3 right-3 z-10">
+          <span className="inline-flex items-center gap-1 bg-emerald-500 text-white text-xs font-bold px-2 py-1 rounded-full">
+            <CheckCircle2 className="w-3 h-3" /> Activo
+          </span>
+        </div>
+      )}
 
-      <div className={`bg-gradient-to-br ${plan.gradient} p-6 text-white`}>
+      <div className={`bg-gradient-to-br ${meta.gradient} p-6 text-white`}>
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center">
               <Icon className="w-5 h-5" />
             </div>
-            <h3 className="text-xl font-bold">{plan.name}</h3>
+            <h3 className="text-xl font-bold">{plan.nombre}</h3>
           </div>
-          {plan.badge && (
+          {meta.badge && (
             <span className="text-xs bg-white/20 px-2.5 py-1 rounded-full font-bold">
-              {plan.badge}
+              {meta.badge}
             </span>
           )}
         </div>
@@ -356,7 +512,7 @@ function PlanCard({
         </div>
         {billingInterval === "year" ? (
           <p className="text-white/70 text-xs">
-            {formatPrice(annualTotal)} al año · Ahorras {formatPrice(plan.annualSavings)}
+            {formatPrice(annualPrice)} al año · Ahorras {formatPrice(annualSavings)}
           </p>
         ) : (
           <p className="text-white/70 text-xs">Facturado mensualmente</p>
@@ -367,12 +523,12 @@ function PlanCard({
         <div className="mb-4 bg-emerald-50 dark:bg-emerald-950/40 rounded-xl px-3 py-2 flex items-center gap-2">
           <Gift className="w-4 h-4 text-emerald-600 shrink-0" />
           <p className="text-xs text-emerald-700 dark:text-emerald-400 font-medium">
-            15 días de prueba gratis incluidos
+            {plan.dias_prueba} días de prueba gratis incluidos
           </p>
         </div>
 
         <ul className="space-y-2.5 flex-1 mb-6">
-          {plan.features.map((feature) => (
+          {(plan.caracteristicas ?? []).map((feature) => (
             <li key={feature} className="flex items-start gap-2.5">
               <Check className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
               <span className="text-sm text-foreground">{feature}</span>
@@ -382,22 +538,24 @@ function PlanCard({
 
         <Button
           onClick={() => onSubscribe(plan)}
-          disabled={isLoading}
+          disabled={isLoading || isActive}
           className={`w-full gap-2 font-semibold ${
-            plan.popular
+            meta.popular
               ? "bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-700 hover:to-purple-700"
               : ""
           }`}
-          variant={plan.popular ? "default" : "outline"}
+          variant={meta.popular ? "default" : "outline"}
         >
           {isLoading ? (
             <><Loader2 className="w-4 h-4 animate-spin" /> Procesando...</>
+          ) : isActive ? (
+            <><CheckCircle2 className="w-4 h-4" /> Plan Actual</>
           ) : (
             <><CreditCard className="w-4 h-4" /> Comenzar prueba gratis</>
           )}
         </Button>
         <p className="text-xs text-muted-foreground text-center mt-2">
-          Sin cargo por 15 días · Cancela cuando quieras
+          Sin cargo por {plan.dias_prueba} días · Cancela cuando quieras
         </p>
       </div>
     </motion.div>

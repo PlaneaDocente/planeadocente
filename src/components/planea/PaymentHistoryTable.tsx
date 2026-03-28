@@ -1,41 +1,93 @@
 
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { CheckCircle2, XCircle, Clock, CreditCard, RefreshCw } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { supabase } from "@/integrations/supabase/client";
 
 interface PaymentRecord {
   id: string;
-  fecha: string;
-  descripcion: string;
-  monto: string;
-  estado: "succeeded" | "pending" | "failed";
-  metodo: string;
+  fecha_pago: string;
+  descripcion: string | null;
+  monto_centavos: number;
+  moneda: string;
+  estado: "succeeded" | "pending" | "failed" | "refunded";
+  stripe_payment_intent_id: string | null;
 }
 
-const MOCK_PAYMENTS: PaymentRecord[] = [
-  { id: "pi_001", fecha: "2025-06-01", descripcion: "PlaneaDocente Profesional - Mensual", monto: "$199.00 MXN", estado: "succeeded", metodo: "Visa •••• 4242" },
-  { id: "pi_002", fecha: "2025-05-01", descripcion: "PlaneaDocente Profesional - Mensual", monto: "$199.00 MXN", estado: "succeeded", metodo: "Visa •••• 4242" },
-  { id: "pi_003", fecha: "2025-04-01", descripcion: "PlaneaDocente Básico - Mensual", monto: "$99.00 MXN", estado: "failed", metodo: "Mastercard •••• 5555" },
-];
-
 const estadoBadge = {
-  succeeded: { label: "Pagado", icon: CheckCircle2, className: "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300" },
-  pending: { label: "Pendiente", icon: Clock, className: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300" },
-  failed: { label: "Fallido", icon: XCircle, className: "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300" },
+  succeeded: {
+    label: "Pagado",
+    icon: CheckCircle2,
+    className: "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300",
+  },
+  pending: {
+    label: "Pendiente",
+    icon: Clock,
+    className: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300",
+  },
+  failed: {
+    label: "Fallido",
+    icon: XCircle,
+    className: "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300",
+  },
+  refunded: {
+    label: "Reembolsado",
+    icon: RefreshCw,
+    className: "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300",
+  },
 };
 
+function formatAmount(cents: number, moneda: string): string {
+  const amount = cents / 100;
+  return `$${amount.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",")} ${moneda.toUpperCase()}`;
+}
+
+function formatDate(dateStr: string): string {
+  return new Date(dateStr).toLocaleDateString("es-MX", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
 export default function PaymentHistoryTable() {
-  const [payments] = useState<PaymentRecord[]>(MOCK_PAYMENTS);
+  const [payments, setPayments] = useState<PaymentRecord[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  const handleRefresh = async () => {
-    setIsRefreshing(true);
-    await new Promise((r) => setTimeout(r, 800));
-    setIsRefreshing(false);
-  };
+  const fetchPayments = useCallback(async (showRefresh = false) => {
+    if (showRefresh) setIsRefreshing(true);
+    else setIsLoading(true);
+
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const userId = sessionData?.session?.user?.id;
+
+      if (!userId) {
+        setPayments([]);
+        return;
+      }
+
+      const res = await fetch(`/api/payment-history?user_id=${userId}`);
+      const json = await res.json();
+
+      if (json.success) {
+        setPayments(json.data ?? []);
+      }
+    } catch (err) {
+      console.error("Error fetching payment history:", err);
+    } finally {
+      setIsLoading(false);
+      setIsRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchPayments();
+  }, [fetchPayments]);
 
   return (
     <Card>
@@ -44,21 +96,33 @@ export default function PaymentHistoryTable() {
           <CardTitle className="text-base">Historial de Pagos</CardTitle>
           <CardDescription>Registro de todos tus pagos y suscripciones</CardDescription>
         </div>
-        <Button variant="ghost" size="sm" onClick={handleRefresh} disabled={isRefreshing}>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => fetchPayments(true)}
+          disabled={isRefreshing}
+        >
           <RefreshCw className={`w-4 h-4 mr-1 ${isRefreshing ? "animate-spin" : ""}`} />
           Actualizar
         </Button>
       </CardHeader>
       <CardContent>
-        {payments.length === 0 ? (
+        {isLoading ? (
+          <div className="space-y-2">
+            {[1, 2, 3].map((i) => (
+              <div key={i} className="h-14 rounded-lg bg-muted/50 animate-pulse" />
+            ))}
+          </div>
+        ) : payments.length === 0 ? (
           <div className="text-center py-8 text-muted-foreground">
             <CreditCard className="w-10 h-10 mx-auto mb-2 opacity-30" />
             <p className="text-sm">No hay pagos registrados aún</p>
+            <p className="text-xs mt-1">Los pagos aparecerán aquí después de suscribirte</p>
           </div>
         ) : (
           <div className="space-y-2">
             {payments.map((p) => {
-              const status = estadoBadge[p.estado];
+              const status = estadoBadge[p.estado] ?? estadoBadge.pending;
               const StatusIcon = status.icon;
               return (
                 <div
@@ -70,13 +134,26 @@ export default function PaymentHistoryTable() {
                       <CreditCard className="w-4 h-4 text-primary" />
                     </div>
                     <div>
-                      <p className="text-sm font-medium">{p.descripcion}</p>
-                      <p className="text-xs text-muted-foreground">{p.fecha} · {p.metodo}</p>
+                      <p className="text-sm font-medium">
+                        {p.descripcion ?? "Suscripción PlaneaDocente"}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {formatDate(p.fecha_pago)}
+                        {p.stripe_payment_intent_id && (
+                          <span className="ml-1 font-mono opacity-60">
+                            · {p.stripe_payment_intent_id.slice(-8)}
+                          </span>
+                        )}
+                      </p>
                     </div>
                   </div>
                   <div className="flex items-center gap-3">
-                    <span className="text-sm font-semibold">{p.monto}</span>
-                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${status.className}`}>
+                    <span className="text-sm font-semibold">
+                      {formatAmount(p.monto_centavos, p.moneda)}
+                    </span>
+                    <span
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${status.className}`}
+                    >
                       <StatusIcon className="w-3 h-3" />
                       {status.label}
                     </span>
